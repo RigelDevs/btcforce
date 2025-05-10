@@ -3,7 +3,6 @@
 *.dll
 *.so
 *.dylib
-btcforce
 btcforce.exe
 test-config
 test-config.exe
