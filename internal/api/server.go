@@ -64,11 +64,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	stats.DuplicateAttempts = s.hopTracker.GetDuplicateStats()
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(stats)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "ok",
 		"time":   time.Now().Format(time.RFC3339),
@@ -104,12 +106,39 @@ func (s *Server) handleRuntime(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
-	stats := s.tracker.GetWorkerDetails()
+	workers := s.tracker.GetWorkerDetails()
+
+	// Create a response structure
+	response := map[string]interface{}{
+		"workers":     workers,
+		"total":       len(workers),
+		"last_update": time.Now().Format(time.RFC3339),
+	}
+
+	// Add summary statistics
+	var totalKeys uint64
+	var totalRate float64
+	var activeCount int
+
+	for _, worker := range workers {
+		totalKeys += worker.KeysChecked
+		if worker.Status == "active" {
+			totalRate += worker.Rate
+			activeCount++
+		}
+	}
+
+	response["summary"] = map[string]interface{}{
+		"total_keys_checked": totalKeys,
+		"total_rate":         totalRate,
+		"active_workers":     activeCount,
+		"idle_workers":       len(workers) - activeCount,
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	if err := json.NewEncoder(w).Encode(stats); err != nil {
+	if err := json.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }

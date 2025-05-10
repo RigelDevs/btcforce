@@ -16,7 +16,7 @@ import (
 
 type Tracker struct {
 	TotalVisited   uint64
-	workerStats    map[int]WorkerStat
+	workerStats    map[int]*WorkerStat // Changed to pointer for easier updates
 	statsMutex     sync.RWMutex
 	visitedRing    []string
 	visitedSet     map[string]bool
@@ -25,6 +25,7 @@ type Tracker struct {
 }
 
 type WorkerStat struct {
+	WorkerID    int       `json:"worker_id"`
 	KeysChecked uint64    `json:"keys_checked"`
 	Rate        float64   `json:"rate"`
 	LastUpdate  time.Time `json:"last_update"`
@@ -44,7 +45,7 @@ const MaxVisited = 100000
 
 func New() *Tracker {
 	return &Tracker{
-		workerStats: make(map[int]WorkerStat),
+		workerStats: make(map[int]*WorkerStat),
 		visitedRing: make([]string, 0, MaxVisited),
 		visitedSet:  make(map[string]bool),
 	}
@@ -76,29 +77,52 @@ func (t *Tracker) UpdateWorkerStats(workerID int, keysChecked uint64, rate float
 	t.statsMutex.Lock()
 	defer t.statsMutex.Unlock()
 
-	t.workerStats[workerID] = WorkerStat{
-		KeysChecked: keysChecked,
-		Rate:        rate,
-		LastUpdate:  time.Now(),
-		Status:      "active",
+	// Create or update worker stat
+	if stat, exists := t.workerStats[workerID]; exists {
+		stat.KeysChecked = keysChecked
+		stat.Rate = rate
+		stat.LastUpdate = time.Now()
+		stat.Status = "active"
+	} else {
+		t.workerStats[workerID] = &WorkerStat{
+			WorkerID:    workerID,
+			KeysChecked: keysChecked,
+			Rate:        rate,
+			LastUpdate:  time.Now(),
+			Status:      "active",
+		}
 	}
 }
 
-func (t *Tracker) GetWorkerDetails() map[int]WorkerStat {
+func (t *Tracker) GetWorkerDetails() []WorkerStat {
 	t.statsMutex.RLock()
 	defer t.statsMutex.RUnlock()
 
-	// Create a copy to avoid race conditions
-	details := make(map[int]WorkerStat)
-	for id, stat := range t.workerStats {
+	// Create a slice of workers for JSON serialization
+	workers := make([]WorkerStat, 0, len(t.workerStats))
+
+	for _, stat := range t.workerStats {
 		// Update status based on last update time
+		workerCopy := *stat // Copy the stat
 		if time.Since(stat.LastUpdate) > 30*time.Second {
-			stat.Status = "idle"
+			workerCopy.Status = "idle"
+		} else if time.Since(stat.LastUpdate) > 10*time.Second {
+			workerCopy.Status = "slow"
 		}
-		details[id] = stat
+		workers = append(workers, workerCopy)
 	}
 
-	return details
+	// Sort workers by ID for consistent output
+	// Simple bubble sort since we typically have few workers
+	for i := 0; i < len(workers); i++ {
+		for j := i + 1; j < len(workers); j++ {
+			if workers[i].WorkerID > workers[j].WorkerID {
+				workers[i], workers[j] = workers[j], workers[i]
+			}
+		}
+	}
+
+	return workers
 }
 
 func (t *Tracker) GetStats() *Stats {
@@ -106,14 +130,20 @@ func (t *Tracker) GetStats() *Stats {
 	defer t.statsMutex.RUnlock()
 
 	var totalSpeed float64
+	activeWorkers := 0
+
 	for _, stat := range t.workerStats {
-		totalSpeed += stat.Rate
+		// Only count active workers in speed calculation
+		if time.Since(stat.LastUpdate) <= 30*time.Second {
+			totalSpeed += stat.Rate
+			activeWorkers++
+		}
 	}
 
 	// Count found wallets
 	foundWallets := 0
 	if data, err := os.ReadFile("wallets_found.log"); err == nil {
-		foundWallets = countOccurrences(string(data), "FOUND\nAddress:")
+		foundWallets = countOccurrences(string(data), "FOUND BY WORKER")
 	}
 
 	// Calculate progress
@@ -156,7 +186,17 @@ func (t *Tracker) GetStats() *Stats {
 
 func (t *Tracker) SaveProgress() error {
 	visited := atomic.LoadUint64(&t.TotalVisited)
-	return os.WriteFile("progress.json", []byte(fmt.Sprintf("%d", visited)), 0644)
+	data := map[string]interface{}{
+		"total_visited": visited,
+		"timestamp":     time.Now().Format(time.RFC3339),
+	}
+
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile("progress.json", jsonData, 0644)
 }
 
 func (t *Tracker) LoadProgress() error {
@@ -165,13 +205,19 @@ func (t *Tracker) LoadProgress() error {
 		return err
 	}
 
-	var visited uint64
-	if err := json.Unmarshal(data, &visited); err == nil {
-		atomic.StoreUint64(&t.TotalVisited, visited)
-	} else {
-		// Try parsing as plain number
-		fmt.Sscanf(string(data), "%d", &visited)
-		atomic.StoreUint64(&t.TotalVisited, visited)
+	var progress map[string]interface{}
+	if err := json.Unmarshal(data, &progress); err != nil {
+		// Try parsing as plain number for backward compatibility
+		var visited uint64
+		if _, err := fmt.Sscanf(string(data), "%d", &visited); err == nil {
+			atomic.StoreUint64(&t.TotalVisited, visited)
+			return nil
+		}
+		return err
+	}
+
+	if visited, ok := progress["total_visited"].(float64); ok {
+		atomic.StoreUint64(&t.TotalVisited, uint64(visited))
 	}
 
 	return nil

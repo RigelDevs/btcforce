@@ -18,7 +18,7 @@ echo Time: %date% %time%
 echo.
 
 REM Check if curl is available
-where curl >nul 2>1
+where curl >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo Error: curl is not installed or not in PATH
     echo Please install curl or add it to your PATH
@@ -27,34 +27,39 @@ if %ERRORLEVEL% NEQ 0 (
 
 REM Get runtime stats
 echo Runtime Stats:
-for /f "delims=" %%i in ('curl -s "http://%HOST%:%PORT%/runtime"') do set runtime=%%i
-echo %runtime% | findstr /C:"goroutines" >nul
-if %ERRORLEVEL% EQU 0 (
-    echo %runtime%
-) else (
-    echo Failed to get runtime stats
-)
+curl -s "http://%HOST%:%PORT%/runtime" > runtime.json
+type runtime.json
+echo.
 echo.
 
 REM Get main stats
 echo Progress Stats:
-for /f "delims=" %%i in ('curl -s "http://%HOST%:%PORT%/stats"') do set stats=%%i
-echo %stats% | findstr /C:"total_visited" >nul
-if %ERRORLEVEL% EQU 0 (
-    echo %stats%
-) else (
-    echo Failed to get progress stats
-)
+curl -s "http://%HOST%:%PORT%/stats" > stats.json
+type stats.json
+echo.
 echo.
 
-REM Get worker details
+REM Get worker details with better parsing
 echo Worker Status:
-for /f "delims=" %%i in ('curl -s "http://%HOST%:%PORT%/workers"') do set workers=%%i
-echo %workers% | findstr /C:"Worker" >nul
+curl -s "http://%HOST%:%PORT%/workers" > workers.json
+
+REM Check if we got valid JSON with workers
+findstr /C:"\"workers\"" workers.json >nul
 if %ERRORLEVEL% EQU 0 (
-    echo %workers%
+    REM Try to parse worker count
+    for /f "tokens=2 delims=:" %%a in ('findstr /C:"\"total\"" workers.json') do (
+        set worker_count=%%a
+        set worker_count=!worker_count:,=!
+        set worker_count=!worker_count: =!
+        echo Total Workers: !worker_count!
+    )
+    
+    REM Display full worker data
+    type workers.json
 ) else (
     echo No worker data available yet
+    echo Raw response:
+    type workers.json
 )
 echo.
 

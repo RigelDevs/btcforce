@@ -1,0 +1,1 @@
+{"cpu_count":20,"gc":{"last_gc":"2025-05-11T00:09:54+08:00","num_gc":2241},"goroutines":139,"memory":{"alloc":39,"heap_alloc":39,"heap_sys":108,"sys":120,"total_alloc":49623}}

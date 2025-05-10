@@ -29,16 +29,18 @@ const (
 )
 
 type WorkerPool struct {
-	cfg          *config.Config
-	tracker      *tracker.Tracker
-	hopTracker   *hoptracker.HopTracker
-	workers      int
-	gpuWorkers   []*gpu.GPUWorker
-	jobChan      chan Job
-	resultChan   chan Result
-	wg           sync.WaitGroup
-	useGPU       bool
-	shutdownOnce sync.Once
+	cfg           *config.Config
+	tracker       *tracker.Tracker
+	hopTracker    *hoptracker.HopTracker
+	workers       int
+	gpuWorkers    []*gpu.GPUWorker
+	jobChan       chan Job
+	resultChan    chan Result
+	wg            sync.WaitGroup
+	useGPU        bool
+	shutdownOnce  sync.Once
+	closed        int32 // Atomic flag to track shutdown state
+	jobChanClosed int32 // Atomic flag for jobChan state
 }
 
 type Job struct {
@@ -123,7 +125,7 @@ func (wp *WorkerPool) Start(ctx context.Context) {
 	// Set GOMAXPROCS to use all CPU cores
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	// Start result processor first (to handle any results that come in)
+	// Start result processor first
 	wp.wg.Add(1)
 	go wp.processResults(ctx)
 
@@ -148,8 +150,8 @@ func (wp *WorkerPool) Start(ctx context.Context) {
 	// Wait for all workers to complete
 	wp.wg.Wait()
 
-	// Close result channel after all workers are done
-	close(wp.resultChan)
+	// Close channels safely
+	wp.shutdown()
 
 	// Cleanup GPU resources
 	if wp.useGPU {
@@ -159,6 +161,75 @@ func (wp *WorkerPool) Start(ctx context.Context) {
 	}
 
 	log.Println("Worker pool stopped")
+}
+
+func (wp *WorkerPool) shutdown() {
+	wp.shutdownOnce.Do(func() {
+		// Mark as shutting down
+		atomic.StoreInt32(&wp.closed, 1)
+
+		// Wait a moment for workers to detect shutdown
+		time.Sleep(100 * time.Millisecond)
+
+		// Close result channel
+		close(wp.resultChan)
+	})
+}
+
+func (wp *WorkerPool) isShutdown() bool {
+	return atomic.LoadInt32(&wp.closed) == 1
+}
+
+func (wp *WorkerPool) isJobChanClosed() bool {
+	return atomic.LoadInt32(&wp.jobChanClosed) == 1
+}
+
+func (wp *WorkerPool) sendJob(job Job) bool {
+	if wp.isJobChanClosed() || wp.isShutdown() {
+		return false
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			// Channel was closed, ignore the panic
+			log.Printf("Recovered from panic while sending job: %v", r)
+		}
+	}()
+
+	select {
+	case wp.jobChan <- job:
+		return true
+	default:
+		// Use blocking send if channel is not full
+		wp.jobChan <- job
+		return true
+	}
+}
+
+func (wp *WorkerPool) sendResult(result Result) bool {
+	if wp.isShutdown() {
+		return false
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			// Channel was closed, ignore the panic
+			log.Printf("Recovered from panic while sending result: %v", r)
+		}
+	}()
+
+	select {
+	case wp.resultChan <- result:
+		return true
+	default:
+		// Channel is full, drop the result if shutting down
+		if wp.isShutdown() {
+			return false
+		}
+		// Otherwise, block and send
+		wp.resultChan <- result
+		return true
+	}
 }
 
 func (wp *WorkerPool) cpuWorker(ctx context.Context, id int) {
@@ -179,17 +250,12 @@ func (wp *WorkerPool) cpuWorker(ctx context.Context, id int) {
 			}
 
 			if job.UseGPU && wp.useGPU {
-				// This job is for GPU, put it back (but check if channel is still open)
-				select {
-				case <-ctx.Done():
-					return
-				case wp.jobChan <- job:
-					time.Sleep(100 * time.Millisecond)
-					continue
-				default:
-					// Channel might be full or closed, skip this job
+				// This job is for GPU, put it back
+				if !wp.sendJob(job) {
 					continue
 				}
+				time.Sleep(100 * time.Millisecond)
+				continue
 			}
 
 			jobSize := new(big.Int).Sub(job.End, job.Start)
@@ -219,17 +285,12 @@ func (wp *WorkerPool) gpuWorkerRoutine(ctx context.Context, id int, gpuWorker *g
 			}
 
 			if !job.UseGPU {
-				// This job is for CPU, put it back (with context check)
-				select {
-				case <-ctx.Done():
-					return
-				case wp.jobChan <- job:
-					time.Sleep(100 * time.Millisecond)
-					continue
-				default:
-					// Channel might be full or closed, skip this job
+				// This job is for CPU, put it back
+				if !wp.sendJob(job) {
 					continue
 				}
+				time.Sleep(100 * time.Millisecond)
+				continue
 			}
 
 			jobSize := new(big.Int).Sub(job.End, job.Start)
@@ -268,11 +329,8 @@ func (wp *WorkerPool) processGPUJob(ctx context.Context, workerID int, job Job, 
 			found, balance := checker.Check(walletInfo)
 			if found {
 				log.Printf("🎯 GPU Worker %d FOUND TARGET!", workerID)
-				// Send result with context check
-				select {
-				case <-ctx.Done():
-					return
-				case wp.resultChan <- Result{
+				// Send result using safe method
+				result := Result{
 					Found:       true,
 					Address:     walletInfo.Address,
 					WIF:         walletInfo.WIF,
@@ -280,10 +338,9 @@ func (wp *WorkerPool) processGPUJob(ctx context.Context, workerID int, job Job, 
 					Balance:     balance,
 					WorkerID:    workerID,
 					KeysChecked: keysChecked,
-				}:
-					// Result sent successfully
-				default:
-					// Result channel might be full or closed
+				}
+
+				if !wp.sendResult(result) {
 					log.Printf("Warning: GPU Worker %d could not send found wallet to result channel", workerID)
 				}
 			}
@@ -336,6 +393,12 @@ func (wp *WorkerPool) processCPUJob(ctx context.Context, workerID int, job Job, 
 		default:
 		}
 
+		// Check if we should stop processing
+		if wp.isShutdown() {
+			log.Printf("CPU Worker %d detected shutdown, stopping", workerID)
+			return
+		}
+
 		// Process keys in batches for better performance
 		batchEnd := new(big.Int).Add(current, big.NewInt(keyBatchSize))
 		if batchEnd.Cmp(job.End) > 0 {
@@ -350,7 +413,8 @@ func (wp *WorkerPool) processCPUJob(ctx context.Context, workerID int, job Job, 
 				found, balance := checker.Check(walletInfo)
 				if found {
 					log.Printf("🎯 CPU Worker %d FOUND TARGET!", workerID)
-					wp.resultChan <- Result{
+					// Use safe method to send result
+					result := Result{
 						Found:       true,
 						Address:     walletInfo.Address,
 						WIF:         walletInfo.WIF,
@@ -358,6 +422,10 @@ func (wp *WorkerPool) processCPUJob(ctx context.Context, workerID int, job Job, 
 						Balance:     balance,
 						WorkerID:    workerID,
 						KeysChecked: keysChecked,
+					}
+
+					if !wp.sendResult(result) {
+						log.Printf("Warning: CPU Worker %d could not send found wallet to result channel", workerID)
 					}
 				}
 			}
@@ -411,7 +479,13 @@ func (wp *WorkerPool) processCPUJob(ctx context.Context, workerID int, job Job, 
 
 func (wp *WorkerPool) generateJobs(ctx context.Context) {
 	defer wp.wg.Done()
-	defer close(wp.jobChan) // Close channel when generator exits
+	defer func() {
+		// Mark job channel as closed
+		atomic.StoreInt32(&wp.jobChanClosed, 1)
+		// Wait a moment for workers to detect the flag
+		time.Sleep(100 * time.Millisecond)
+		close(wp.jobChan)
+	}()
 
 	jobID := 0
 	consecutiveFailures := 0
@@ -480,12 +554,10 @@ func (wp *WorkerPool) generateJobs(ctx context.Context) {
 			log.Printf("📦 Generated %s job %d: %x to %x (size: %s keys)",
 				workerType, job.ID, start, end, jobSize.String())
 
-			// Send job with context check
-			select {
-			case <-ctx.Done():
+			// Send job using safe method
+			if !wp.sendJob(job) {
+				log.Printf("Failed to send job %d, shutting down", job.ID)
 				return
-			case wp.jobChan <- job:
-				// Job successfully sent
 			}
 		}
 	}

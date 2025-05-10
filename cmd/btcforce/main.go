@@ -48,13 +48,6 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	go func() {
-		sig := <-sigChan
-		fmt.Printf("\nReceived signal: %v\n", sig)
-		fmt.Println("Shutting down gracefully...")
-		cancel()
-	}()
-
 	// Initialize components
 	tracker := tracker.New()
 	hopTracker, err := hoptracker.New(cfg.Seed, cfg.MaxAreas, cfg.SearchStrategy)
@@ -70,12 +63,58 @@ func main() {
 		log.Printf("Resumed from checkpoint: %d keys checked", tracker.TotalVisited)
 	}
 
-	// Start services
-	if err := startServices(ctx, cfg, tracker, hopTracker); err != nil {
-		log.Fatalf("Failed to start services: %v", err)
-	}
+	// Wait group for shutdown synchronization
+	var shutdownWg sync.WaitGroup
+	shutdownComplete := make(chan struct{})
 
-	// Save final progress
+	// Start services in a goroutine
+	shutdownWg.Add(1)
+	go func() {
+		defer shutdownWg.Done()
+		if err := startServices(ctx, cfg, tracker, hopTracker); err != nil {
+			log.Printf("Error during service execution: %v", err)
+		}
+	}()
+
+	// Handle shutdown signal
+	go func() {
+		sig := <-sigChan
+		fmt.Printf("\nReceived signal: %v\n", sig)
+		fmt.Println("Shutting down gracefully...")
+
+		// Cancel context to signal all services to stop
+		cancel()
+
+		// Wait for services to shut down in another goroutine
+		go func() {
+			shutdownWg.Wait()
+			close(shutdownComplete)
+		}()
+
+		// Wait for shutdown with timeout
+		select {
+		case <-shutdownComplete:
+			fmt.Println("Services stopped successfully")
+		case <-time.After(30 * time.Second):
+			fmt.Println("Shutdown timeout exceeded, forcing exit...")
+		}
+
+		// Save final progress
+		fmt.Println("Saving progress...")
+		if err := tracker.SaveProgress(); err != nil {
+			log.Printf("Failed to save progress: %v", err)
+		} else {
+			fmt.Println("Progress saved successfully")
+		}
+
+		fmt.Println("\nShutdown complete")
+		os.Exit(0)
+	}()
+
+	// Wait for normal completion
+	shutdownWg.Wait()
+
+	// Save final progress on normal exit
 	if err := tracker.SaveProgress(); err != nil {
 		log.Printf("Failed to save progress: %v", err)
 	}
