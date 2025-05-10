@@ -58,6 +58,13 @@ func FromPrivateKey(privKey *big.Int) *WalletInfo {
 	}
 }
 
+// FromPrivateKeyHex creates a wallet from a hex string private key
+func FromPrivateKeyHex(hexKey string) *WalletInfo {
+	privKey := new(big.Int)
+	privKey.SetString(hexKey, 16)
+	return FromPrivateKey(privKey)
+}
+
 func LogFound(msg string) error {
 	file, err := os.OpenFile("wallets_found.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {

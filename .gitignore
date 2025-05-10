@@ -4,6 +4,9 @@
 *.so
 *.dylib
 btcforce
+btcforce.exe
+test-config
+test-config.exe
 
 # Test binary, built with `go test -c`
 *.test
@@ -16,12 +19,15 @@ go.work
 
 # Environment variables
 .env
+.env.local
+.env.*.local
 
 # Database
 visited_db/
 
 # Logs
 *.log
+logs/
 
 # Progress files
 progress.json
@@ -33,3 +39,41 @@ wallets_found.log
 .vscode/
 *.swp
 *.swo
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# CUDA/GPU
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.cu.obj
+*.fatbin
+*.cubin
+*.ptx
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build directories
+build/
+Debug/
+Release/
+x64/
+x86/
+
+# CUDA build artifacts
+*.i
+*.ii
+*.gpu
+*.ptx
+*.cubin
+*.fatbin

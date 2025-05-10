@@ -37,6 +37,12 @@ type Config struct {
 	Seed       int64
 	MaxAreas   int
 
+	// GPU Support
+	UseGPU       bool
+	GPUBatchSize int
+	CUDAPath     string
+	PreferGPU    bool
+
 	// Search range
 	MinHex  *big.Int
 	MaxHex  *big.Int
@@ -68,6 +74,12 @@ func Load() (*Config, error) {
 		MaxAreas:   1000,
 		HopSize:    new(big.Int),
 	}
+
+	// GPU Configuration
+	cfg.UseGPU = getEnvBool("USE_GPU", true)
+	cfg.GPUBatchSize = getEnvInt("GPU_BATCH_SIZE", 1048576) // 1M keys per batch
+	cfg.CUDAPath = getEnv("CUDA_PATH", "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.0")
+	cfg.PreferGPU = getEnvBool("PREFER_GPU", true)
 
 	// Parse HopSize
 	hopSize := getEnv("HOP_SIZE", "100000")
