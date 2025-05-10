@@ -1,0 +1,35 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+btcforce
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Environment variables
+.env
+
+# Database
+visited_db/
+
+# Logs
+*.log
+
+# Progress files
+progress.json
+checkpoint.json
+wallets_found.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
